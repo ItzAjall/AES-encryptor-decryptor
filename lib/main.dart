@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:local_auth/local_auth.dart';
 import 'secure_crypto.dart';
 
 void main() {
@@ -32,12 +34,15 @@ class _HomePageState extends State<HomePage> {
   final textController = TextEditingController();
   final passController = TextEditingController();
   final crypto = SecureCrypto();
+  final auth = LocalAuthentication();
 
   String output = "";
   bool showPassword = false;
 
   Map<String, String> savedPasswords = {};
   List<String> history = [];
+  Set<String> pinned = {};
+  bool biometricEnabled = false;
 
   @override
   void initState() {
@@ -50,14 +55,14 @@ class _HomePageState extends State<HomePage> {
 
     final p = prefs.getString("passwords");
     final h = prefs.getString("history");
+    final pin = prefs.getString("pinned");
+    final bio = prefs.getBool("bio") ?? false;
 
-    if (p != null) {
-      savedPasswords = Map<String, String>.from(jsonDecode(p));
-    }
-    if (h != null) {
-      history = List<String>.from(jsonDecode(h));
-    }
+    if (p != null) savedPasswords = Map<String, String>.from(jsonDecode(p));
+    if (h != null) history = List<String>.from(jsonDecode(h));
+    if (pin != null) pinned = Set<String>.from(jsonDecode(pin));
 
+    biometricEnabled = bio;
     setState(() {});
   }
 
@@ -65,12 +70,21 @@ class _HomePageState extends State<HomePage> {
     final prefs = await SharedPreferences.getInstance();
     prefs.setString("passwords", jsonEncode(savedPasswords));
     prefs.setString("history", jsonEncode(history));
+    prefs.setString("pinned", jsonEncode(pinned.toList()));
+    prefs.setBool("bio", biometricEnabled);
   }
 
-  void addHistory(String text) {
-    history.insert(0, text);
-    if (history.length > 20) history.removeLast();
-    saveData();
+  Future<bool> unlock() async {
+    if (!biometricEnabled) return true;
+
+    try {
+      return await auth.authenticate(
+        localizedReason: "Unlock",
+        options: const AuthenticationOptions(biometricOnly: true),
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
   void encrypt() {
@@ -91,6 +105,35 @@ class _HomePageState extends State<HomePage> {
     addHistory("🔓 $res");
   }
 
+  void addHistory(String text) {
+    history.insert(0, text);
+    if (history.length > 20) history.removeLast();
+    saveData();
+  }
+
+  void deleteHistory(int i) {
+    history.removeAt(i);
+    saveData();
+    setState(() {});
+  }
+
+  void deletePassword(String key) {
+    savedPasswords.remove(key);
+    pinned.remove(key);
+    saveData();
+    setState(() {});
+  }
+
+  void togglePin(String key) {
+    if (pinned.contains(key)) {
+      pinned.remove(key);
+    } else {
+      pinned.add(key);
+    }
+    saveData();
+    setState(() {});
+  }
+
   void showSaveDialog() {
     final nameController = TextEditingController();
 
@@ -104,8 +147,8 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           TextButton(
-            child: const Text("Cancel"),
             onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
           ),
           ElevatedButton(
             child: const Text("Save"),
@@ -122,6 +165,15 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  String generateStrongPassword({int length = 16}) {
+    const chars =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#\$%^&*()-_=+[]{};:,.<>?";
+    final rand = Random.secure();
+    return List.generate(length, (index) {
+      return chars[rand.nextInt(chars.length)];
+    }).join();
   }
 
   Widget glass(Widget child) {
@@ -146,14 +198,30 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget drawerMenu() {
+    final sortedKeys = savedPasswords.keys.toList()
+      ..sort((a, b) {
+        if (pinned.contains(a) && !pinned.contains(b)) return -1;
+        if (!pinned.contains(a) && pinned.contains(b)) return 1;
+        return a.compareTo(b);
+      });
+
     return Drawer(
       child: Container(
         color: const Color(0xFF0F172A),
         child: ListView(
           children: [
-
             const DrawerHeader(
               child: Text("Menu", style: TextStyle(fontSize: 20)),
+            ),
+
+            SwitchListTile(
+              title: const Text("Biometric Lock"),
+              value: biometricEnabled,
+              onChanged: (v) {
+                biometricEnabled = v;
+                saveData();
+                setState(() {});
+              },
             ),
 
             const Padding(
@@ -161,13 +229,38 @@ class _HomePageState extends State<HomePage> {
               child: Text("Saved Passwords"),
             ),
 
-            ...savedPasswords.keys.map((key) => ListTile(
-                  title: Text(key),
-                  onTap: () {
-                    passController.text = savedPasswords[key]!;
-                    Navigator.pop(context);
-                    setState(() {});
+            ...sortedKeys.map((key) => ListTile(
+                  title: Row(
+                    children: [
+                      if (pinned.contains(key))
+                        const Icon(Icons.star,
+                            color: Colors.amber, size: 16),
+                      const SizedBox(width: 6),
+                      Text(key),
+                    ],
+                  ),
+                  onTap: () async {
+                    if (await unlock()) {
+                      passController.text = savedPasswords[key]!;
+                      Navigator.pop(context);
+                      setState(() {});
+                    }
                   },
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: Icon(pinned.contains(key)
+                            ? Icons.star
+                            : Icons.star_border),
+                        onPressed: () => togglePin(key),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete),
+                        onPressed: () => deletePassword(key),
+                      ),
+                    ],
+                  ),
                 )),
 
             const Divider(),
@@ -177,14 +270,16 @@ class _HomePageState extends State<HomePage> {
               child: Text("History"),
             ),
 
-            ...history.map((item) => ListTile(
-                  title: Text(item),
-                  onTap: () {
-                    textController.text = item;
-                    Navigator.pop(context);
-                    setState(() {});
-                  },
-                )),
+            ...history.asMap().entries.map((e) {
+              int i = e.key;
+              return ListTile(
+                title: Text(e.value),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete),
+                  onPressed: () => deleteHistory(i),
+                ),
+              );
+            }),
           ],
         ),
       ),
@@ -195,10 +290,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       drawer: drawerMenu(),
-
-      appBar: AppBar(
-        title: const Text("AES Secure"),
-      ),
+      appBar: AppBar(title: const Text("AES Secure")),
 
       body: Container(
         decoration: const BoxDecoration(
@@ -241,19 +333,46 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
+              const SizedBox(height: 10),
+
+              SizedBox(
+                height: 50,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.deepPurple,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  onPressed: () {
+                    passController.text = generateStrongPassword();
+                  },
+                  icon: const Icon(Icons.bolt),
+                  label: const Text("Generate Strong Password"),
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
               Row(
                 children: [
                   Expanded(
-                      child: ElevatedButton(
-                          onPressed: encrypt, child: const Text("Encrypt"))),
+                    child: ElevatedButton(
+                      onPressed: encrypt,
+                      child: const Text("Encrypt"),
+                    ),
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
-                      child: ElevatedButton(
-                          onPressed: decrypt, child: const Text("Decrypt"))),
+                    child: ElevatedButton(
+                      onPressed: decrypt,
+                      child: const Text("Decrypt"),
+                    ),
+                  ),
                 ],
               ),
 
-              const SizedBox(height: 10),
+              const SizedBox(height: 20),
 
               ElevatedButton(
                 onPressed: showSaveDialog,

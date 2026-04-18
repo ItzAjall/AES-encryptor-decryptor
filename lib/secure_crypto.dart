@@ -1,51 +1,56 @@
-import 'dart:math';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
-import 'package:encrypt/encrypt.dart';
 import 'package:crypto/crypto.dart';
+import 'package:encrypt/encrypt.dart';
 
 class SecureCrypto {
-  String encryptPassword(String password) {
-  return encryptText(password, "master_key_123");
-}
+  Uint8List _deriveKey(String password) {
+    var key = utf8.encode(password);
+    var hash = sha256.convert(key).bytes;
 
-String decryptPassword(String data) {
-  return decryptText(data, "master_key_123");
-}
+    for (int i = 0; i < 10000; i++) {
+      hash = sha256.convert(hash).bytes;
+    }
 
-  Key deriveKey(String password) {
-    final bytes = utf8.encode(password);
-    final digest = sha256.convert(bytes).bytes;
-    return Key(Uint8List.fromList(digest));
+    return Uint8List.fromList(hash);
   }
 
-  IV generateIV() {
-    final random = Random.secure();
-    final iv = List<int>.generate(16, (_) => random.nextInt(256));
-    return IV(Uint8List.fromList(iv));
+  IV _generateIV() {
+    final r = Random.secure();
+    return IV(Uint8List.fromList(
+      List.generate(12, (_) => r.nextInt(256)),
+    ));
   }
 
   String encryptText(String text, String password) {
-    final key = deriveKey(password);
-    final iv = generateIV();
+    final key = _deriveKey(password);
+    final iv = _generateIV();
 
-    final encrypter = Encrypter(AES(key, mode: AESMode.cbc));
+    final encrypter = Encrypter(
+      AES(Key(key), mode: AESMode.gcm),
+    );
 
     final encrypted = encrypter.encrypt(text, iv: iv);
 
-    return base64Encode(iv.bytes + encrypted.bytes);
+    return "${iv.base64}:${encrypted.base64}";
   }
 
   String decryptText(String data, String password) {
-    final key = deriveKey(password);
+    try {
+      final parts = data.split(":");
+      final key = _deriveKey(password);
 
-    final decoded = base64Decode(data);
+      final iv = IV.fromBase64(parts[0]);
+      final encrypted = Encrypted.fromBase64(parts[1]);
 
-    final iv = IV(decoded.sublist(0, 16));
-    final encrypted = Encrypted(decoded.sublist(16));
+      final encrypter = Encrypter(
+        AES(Key(key), mode: AESMode.gcm),
+      );
 
-    final encrypter = Encrypter(AES(key, mode: AESMode.cbc));
-
-    return encrypter.decrypt(encrypted, iv: iv);
+      return encrypter.decrypt(encrypted, iv: iv);
+    } catch (_) {
+      return "Decryption failed";
+    }
   }
 }
